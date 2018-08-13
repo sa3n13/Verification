@@ -1,0 +1,317 @@
+set ignoreTypes = false. 
+
+free c : channel.  (* a public communication channel *)
+free secC : channel [private]. (* Secure communication channel *)
+
+(* declare all used types*)
+type host. 	(* honest principle type *)
+type nonce.
+type policy. 
+type tag. 
+
+(* Security Properties *)
+free attribute: bitstring [private]. 	(* Identity attribute to be processed *) 
+free d: bitstring [private]. 		(* data element to be shared *)
+free css: bitstring [private]. 	(* Conditional Subscription Secret *)
+
+(* declare all used crypto primitives as functions *)
+(* Public-key crypto *)
+type pkey. (* public key *)
+type skey. (* Secret key *)
+fun pk(skey): pkey. (* Constructing a key pair *)
+fun aenc (bitstring, pkey): bitstring.  (* Encrypt with public key *)
+reduc forall m: bitstring, sk:skey; adec(aenc(m,pk(sk)),sk)= m.
+
+(* Digital Signature *)
+type spkey. (* public signing key *)
+type sskey. (* private signing key *)
+fun spk(sskey): spkey.  (* Constructing a signing key pair *)
+fun sign(bitstring, sskey): bitstring.  (* signing a message with asecret signing key *)
+reduc forall m: bitstring, k: sskey;  getmess(sign(m,k))= m. (* message recovery *)
+reduc forall m: bitstring, k: sskey;   checksign(sign(m,k), spk(k))= m. (* signature verification *)
+
+(* Symmetric key / shared key crypto *)
+type key. (* Symmetric key *)
+(* This is done inside the enclave we may not need it *)
+fun keyGen (policy, bitstring): key.   (* Symmetric key generation function, the second argument is the data to be shared  *) 
+fun keyReCon (bitstring, bitstring): key.   (* Symmetric key reconstruction function, the second argument here is the encrypted data *) 
+equation  forall m: bitstring, em: bitstring, p: policy, css: bitstring;  
+keyReCon(css, em )= keyGen (p, m).
+
+fun senc (bitstring, key): bitstring.  (* Encrypt with symmetric key *)
+reduc forall m: bitstring, k: key;  sdec(senc(m,k),k) = m. (* Where m is the message*) 
+ 
+(* Hash function *)
+type ref. 
+fun hash(bitstring): ref. (* a unary constructor with no associayed destructor or equations *)
+
+(* Commitement scheme *)   
+type rand.
+fun commit(bitstring , rand): bitstring. 
+reduc forall m: bitstring, r: rand;  open(commit(m,r),r)=m.
+
+table ACMkey (host, host, key, bitstring ).   (* to hold shared key to encrypt data *)
+table Rkey (host, host, key, bitstring).  (* to hold shared key to encrypt data *)
+table keys(host, pkey).  (* the table host names/keys consists of pairs (host, public key) *)
+table bindD_P (tag, policy, ref).	(* binding data element with its coreesponding policy *)
+(* table sentCSS (DE, Attribute,  ????? *)
+
+(* Queries *)
+query attacker (attribute).  (* test whether attribute is secret *)
+query attacker (d). (* test whether d is secret *)
+query attacker (css). (* test whether css is secret *)
+
+(* Secrecy assumptions *)
+not attacker (new skIdP).   (* secret key of IdP *)
+not attacker (new sskIdP).  (* secret signing key of IdP *) 
+not attacker (new skR).  (* secret key of R *)
+not attacker (new sskR).  (* secret siging key for R *)
+not attacker (new skACM).  (* secret key for access control manager *)
+not attacker (new sskACM).  (* secret siging key for access control manager *)
+
+(* Honest principals *)
+free IdP, R, ACM: host.  
+free S, B : host.  (* Storage and Blockchain *) 
+
+(* Protocol sequence by events *) 
+event sendData (pkey,tag,bitstring,ref ).  (* Process by ACM (pkACM, d_tag, encrypted data, hash of encrypted data) *) 
+event acceptData (pkey,tag,bitstring,ref ).     (* Process by S (pkACM, d_tag, encrypted data, hash of encrypted data) *) 
+event publishPolicy (tag, policy, ref).    (* Process by ACM (d_tag, policy, hash of encrypted data  )  *)
+event acceptPolicy (tag, policy, ref) . (* Process by Blockchain  *)
+event requestToken (nonce ,bitstring ,pkey).  (* Process by  R*)
+event acceptToken (nonce ,bitstring ,pkey).  (* Process by IdP *)
+event createToken (pkey , tag,bitstring).   (* Process by IdP *)
+event publishToken (pkey , tag , bitstring ).           (* Process by blockchain *)
+event deliverToken (nonce, ref) .          (* Process by IdP *)
+event receiveToken (nonce, ref).          (* Process by R *) 
+event requestAccess (pkey , nonce , tag).   (* Process by R *) 
+event acceptAccess (pkey , nonce , tag).   (* Process by ACM *) 
+event requestPolicy (tag).  (* Process by ACM *) 
+event acceptPolicyRetrieval (tag).  (* Process by Blockchain *) 
+event retrievePolicy ( tag, policy, ref).  (* Process by Blockchain *) 
+event recievePloicy ( tag, policy, ref).   (* Process by ACM *)
+event sendPolicy (nonce , tag,  policy, ref).    (* Process by ACM  *)
+event getPolicy (nonce , tag,  policy, ref).      (* Process by R  *)
+event sendHToken (nonce, ref).   (* Process by R *)
+event  acceptHToken (nonce, ref).   (* Process by ACM  *) 
+event requestTokenRetrieval (ref).  (* Process by ACM *) 
+event acceptTokenRetrieval (ref).   (* Process by blockchain *) 
+event retrieveToken (bitstring).  (* Process by blockchain *) 
+event getToken (pkey ,tag , bitstring).  (* Process by ACM *) 
+event sendCSS (nonce,bitstring).  (* Process by ACM *) 
+event accpetCSS (nonce, bitstring).  (* Process by R *)  
+event sendHData (ref). 
+event recieveHdata (ref ). 
+event retriveData (bitstring ).
+event acceptDataRetrieval (bitstring). 
+
+(* Protocol interactions *)
+(* ACM *)
+let ProcessACM (skACM: skey , sskACM: sskey ,  pkACM: pkey , spkACM:spkey, pkR: pkey, spkIdP: spkey ) =
+	new d_tag: tag;
+	new p: policy; 
+	let k = keyGen (p, d) in 
+	let m: bitstring = senc( d, k) in
+	insert  ACMkey (ACM, R, k, m ); (* to check that k is the same at ACM and R *) 
+	let h: ref = hash (m) in 
+	(* insert bindD_P (d_tag, p, h); *)
+	event sendData (pkACM,d_tag, m, h);
+	(* We could create somthing like bound (tag, ref) ??? *) 
+	
+	(* Message 1 to storage -   authenticated, storage shoud recalculate the hash  *)	
+	out(c, (pkACM, sign((d_tag, m, h),sskACM))) ; 	(* if we want authinticated message *)
+	out (c, m); (* send some encrypted data to adversary *)
+
+	(* Message 2 to blockchain - aurhenticated  *)
+	event publishPolicy (d_tag, p, h);
+	out ( c, sign ((d_tag, p, h),sskACM));  (* No need for the public key here, because this will be sent from the actual PK *)
+	
+	(* recieve message 6 from R *)
+	in (c , x: bitstring );
+	let (pkX: pkey , n_data: nonce, d_tag: tag ) = adec (x, skACM) in 
+	event acceptAccess (pkX, n_data, d_tag); 
+	
+	(* Messsage 7 to Blockchain *)  
+	event requestPolicy (d_tag); 
+		out (c , d_tag);        (*  all messages to the blockchain are authenticated  *) 
+
+	(* recieve message 8 from Blockchain  *)
+	in (c, signM: bitstring);
+	let (d_tag: tag, p: policy, h: ref) =
+	checksign (signM, spkACM ) in 
+	 event recievePloicy (d_tag ,p ,h ); 	
+
+	(* Message 9 to R *)
+	event sendPolicy (n_data, d_tag, p, h);
+		out (c , aenc ( (n_data, d_tag, p, h) ,pkR));
+
+	(* recieve messae 10 from R *)
+	in (c, x: bitstring);
+	let (n_data: nonce, hToken: ref ) = adec (x , skACM ) in
+	event  acceptHToken (n_data, hToken); 	
+
+	(* Message 11 to Blockchain  *) 	
+	event requestTokenRetrieval (hToken); 
+		out (c , hToken);        (*  all messages to the blockchain are authenticated  *) 
+
+	(* receive message 12 from blockchain *) 
+	in (c, signedToken: bitstring);
+	let (pkR: pkey, id_tag: tag, com: bitstring) = 
+	checksign (signedToken, spkIdP) in  
+	event getToken (pkR, id_tag, com);
+
+	(* Message 13 to R *)  
+	event sendCSS (n_data, css); 
+		out (secC , (n_data, css)).
+	
+
+(* IdP *)	
+let processIdP (pkR: pkey,  skIdP: skey,  sskIdP: sskey ) =
+	(* Receive message 3 from R *)
+	in (c, encM: bitstring);
+	let (n_token: nonce ,  attribute: bitstring  , pkR: pkey )  = adec (encM , skIdP ) in 
+	event acceptToken (n_token,attribute , pkR);
+	
+	(* Message 4  to blockchain *) 
+	new id_tag: tag;
+	new r: rand;
+	let com =  commit (attribute ,r ) in  
+
+	event createToken (pkR, id_tag, com);
+	let token = sign( (pkR, id_tag,  com) ,sskIdP) in 
+		out ( c, token);
+
+	(* Message  5 to R *) 
+	let hToken = hash (token) in 
+	event deliverToken (n_token, hToken); 
+		out ( c, aenc ((n_token, hToken), pkR)).
+
+
+(* R *)
+let processR (skR: skey, pkR: pkey, sskR: sskey, spkR: spkey, pkIdP: pkey,  pkACM: pkey ) =
+	(* Message 3 to IdP*)
+	new n_token: nonce ;
+	event  requestToken ( n_token, attribute , pkR ) ;
+		out (c, aenc (( n_token, attribute , pkR ) , pkIdP)) ; 
+	
+	(* receive message  5 from IdP *)
+	in ( c , encM: bitstring) ; 
+	let (n_token: nonce, hToken: ref ) = adec (encM , skR ) in
+	event receiveToken (n_token, hToken);
+
+	(*  Message 6  to ACM *)
+	new n_data: nonce ; 
+	new d_tag: tag; 
+	event requestAccess (pkR, n_data, d_tag);
+		out (c , aenc ( (pkR, n_data, d_tag ), pkACM)) ;
+
+	(* receive message 9 from ACM *)
+	in (c , x: bitstring) ; 
+	let (n_data: nonce , d_tag: tag, p: policy, h: ref) = adec (x , skR) in 
+	event getPolicy (n_data ,d_tag,  p, h);
+	
+	(* Message 10 to ACM *) 	
+	event sendHToken (n_data, hToken); 		
+		out (c , aenc ( ( n_data, hToken) , pkACM)) ;
+
+	(*recieve message 13 from ACM *)
+	in (secC, (n_data: nonce, css: bitstring)); 
+	event accpetCSS (n_data,css); 	
+
+	(* Message 14 to S *) 	
+	event sendHData (h); 
+		out (c, h); 
+
+	(* recieve message 15 from S *)
+	in (c, m:bitstring) ;
+	let k = keyReCon (css, m) in         (* regenerating the key *) 
+	let x=  sdec (m, k) in
+	insert Rkey (ACM, R, k, m); (* to check that k is the same at ACM and R *)  
+	event acceptDataRetrieval (m) .
+
+(* S *)
+let processS ( pkACM: pkey, spkACM: spkey, pkR: pkey ) =
+	(* receive message 1 from ACM *)
+	in (c, (pkx: pkey, signM: bitstring));  (* S accepts messages from anyone *)
+	let (d_tag: tag, m: bitstring, h: ref) =
+	checksign(signM, spkACM) in 
+	event acceptData (pkACM,d_tag,m,h );     (* Process by S (pkACM, d_tag, encrypted data, hash of encrypted data) *) 
+
+	(* recieve message 14 from R *) 
+	in (c, h:ref); 
+	event recieveHdata (h); 
+
+	(* Message 15 to R *) 
+	event retriveData ( m);
+	out (c, m). 
+
+
+(* blockchain *)
+let processB (spkACM: spkey, spkIdP: spkey ) =
+	(* receive message 2 from ACM *) 
+	in (c, signM: bitstring);
+	let (d_tag: tag, p: policy, h: ref) =
+	checksign (signM, spkACM ) in 
+	insert bindD_P (d_tag, p, h);
+	event acceptPolicy (d_tag, p, h); 
+
+	(* receive message  4 from IdP *)
+	in ( c, signedToken: bitstring); 
+	let (pkR: pkey, id_tag: tag, com: bitstring) = 
+	checksign (signedToken, spkIdP) in  
+	event publishToken ( pkR,id_tag, com);
+
+	(* recieve message 7 from ACM *)
+	in (c , d_tag: tag) ; 
+	event acceptPolicyRetrieval (d_tag);
+
+ 	(* Message 8 to ACM *)
+	event retrievePolicy ( d_tag,p ,h );
+	out (c, signM); 
+
+	(* reacive message 11 from ACM *)
+	in (c, hToken:ref) ;  
+	event acceptTokenRetrieval (hToken); 
+
+	(* Message 12 to ACM  *) 
+	event retrieveToken ( signedToken);
+		out (c , signedToken). 
+
+
+(*Main Process*)
+process 
+(* Create ACM keys *)
+	(* ACM signing key pairs *)
+	new sskACM : sskey ;  (* generate a signing key for ACM *)
+	let spkACM = spk(sskACM) in out ( c , spkACM);  (* broadcast the public key via channel c  *)
+	
+	(*ACM encryption keys *)
+	new skACM : skey;  (* generate asymmetric key for ACM *)
+	let pkACM = pk(skACM) in out ( c , pkACM);    (* broadcast the public key via channel c  *)
+
+(* Create IdP keys *)
+	(* IdP signing key pairs *)
+	new sskIdP : sskey;  (* generate a signing key for IdP *)
+	let spkIdP = spk (sskIdP) in out ( c , spkIdP);  (* broadcast the public key via channel c  *)
+	
+	(*IdP encryption keys *)
+	new skIdP : skey;  (* generate asymmetric key for IdP *)
+	let pkIdP = pk(skIdP) in out ( c , pkIdP);    (* broadcast the public key via channel c  *)
+
+(* Create R keys *) 
+	(* R signing key pairs *)
+	new sskR : sskey;  (* generate a signing key for R *)
+	let spkR = spk (sskR) in out ( c , spkR);  (* broadcast the public key via channel c  *)
+	
+	(* R encryption keys *)
+	new skR : skey;  (* generate asymmetric key for R *)
+	let pkR = pk(skR) in out ( c , pkR);    (* broadcast the public key via channel c  *)
+
+
+	(* Start processes *)
+	(  ( ! ProcessACM( skACM, sskACM,  pkACM, spkACM, pkR, spkIdP) ) |	
+    	( ! processIdP (pkR, skIdP, sskIdP ) ) |
+    	( ! processR (skR, pkR, sskR, spkR, pkIdP, pkACM) )  |
+	( ! processB (spkACM ,spkACM)  ) |
+	( ! processS (pkACM, spkIdP,pkR) )
+	)
